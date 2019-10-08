@@ -24,8 +24,8 @@ def main():
     parser.add_argument('--mask_dir', default='masks', help='Directory for storing optional masks')
     parser.add_argument('--load_last', default='', help='Start with embeddings from directory')
     parser.add_argument('--dlatent_avg', default='', help='Use dlatent from file specified here for truncation instead of dlatent_avg from Gs')
-    parser.add_argument('--model_url', default='https://drive.google.com/uc?id=1MEGjdvVpUsu1jB4zrXZN7Y4kBBOzizDQ', help='Fetch a StyleGAN model to train on from this URL') # karras2019stylegan-ffhq-1024x1024.pkl
-    parser.add_argument('--model_res', default=1024, help='The dimension of images in the StyleGAN model', type=int)
+    parser.add_argument('--model_url', default='../stylegan/results/00003-sgan-car-2gpu/network-snapshot-005720.pkl', help='Fetch a StyleGAN model to train on from this URL') # karras2019stylegan-ffhq-1024x1024.pkl
+    parser.add_argument('--model_res', default=256, help='The dimension of images in the StyleGAN model', type=int)
     parser.add_argument('--batch_size', default=1, help='Batch size for generator and perceptual model', type=int)
 
     # Perceptual model params
@@ -39,16 +39,17 @@ def main():
     parser.add_argument('--load_resnet', default='data/finetuned_resnet.h5', help='Model to load for ResNet approximation of dlatents')
 
     # Loss function options
-    parser.add_argument('--use_vgg_loss', default=0.4, help='Use VGG perceptual loss; 0 to disable, > 0 to scale.', type=float)
+    parser.add_argument('--use_vgg_loss', default=100, help='Use VGG perceptual loss; 0 to disable, > 0 to scale.', type=float)
     parser.add_argument('--use_vgg_layer', default=9, help='Pick which VGG layer to use.', type=int)
     parser.add_argument('--use_pixel_loss', default=1.5, help='Use logcosh image pixel loss; 0 to disable, > 0 to scale.', type=float)
     parser.add_argument('--use_mssim_loss', default=100, help='Use MS-SIM perceptual loss; 0 to disable, > 0 to scale.', type=float)
     parser.add_argument('--use_lpips_loss', default=100, help='Use LPIPS perceptual loss; 0 to disable, > 0 to scale.', type=float)
+    parser.add_argument('--use_facenet_loss', default=20, help='Use facenet perceptual loss; 0 to disable, > 0 to scale.', type=float)
     parser.add_argument('--use_l1_penalty', default=1, help='Use L1 penalty on latents; 0 to disable, > 0 to scale.', type=float)
 
     # Generator params
     parser.add_argument('--randomize_noise', default=False, help='Add noise to dlatents during optimization', type=bool)
-    parser.add_argument('--tile_dlatents', default=False, help='Tile dlatents to use a single vector at each scale', type=bool)
+    parser.add_argument('--tile_dlatents', default=True, help='Tile dlatents to use a single vector at each scale', type=bool)
     parser.add_argument('--clipping_threshold', default=2.0, help='Stochastic clipping of gradient values outside of this threshold', type=float)
 
     # Masking params
@@ -87,7 +88,9 @@ def main():
 
     # Initialize generator and perceptual model
     tflib.init_tf()
-    with dnnlib.util.open_url(args.model_url, cache_dir=config.cache_dir) as f:
+    # with dnnlib.util.open_url(args.model_url, cache_dir=config.cache_dir) as f:
+    #     generator_network, discriminator_network, Gs_network = pickle.load(f)
+    with open(args.model_url, 'rb') as f:
         generator_network, discriminator_network, Gs_network = pickle.load(f)
 
     generator = Generator(Gs_network, args.batch_size, clipping_threshold=args.clipping_threshold, tiled_dlatent=args.tile_dlatents, model_res=args.model_res, randomize_noise=args.randomize_noise)
@@ -98,8 +101,14 @@ def main():
     if (args.use_lpips_loss > 0.00000001):
         with dnnlib.util.open_url('https://drive.google.com/uc?id=1N2-m9qszOeVC9Tq77WxsLnuWwOedQiD2', cache_dir=config.cache_dir) as f:
             perc_model =  pickle.load(f)
-    perceptual_model = PerceptualModel(args, perc_model=perc_model, batch_size=args.batch_size)
+
+    facenet_model = None
+    if (args.use_facenet_loss > 0.00000001):
+        facenet_model = load_model('/home/duke/Documents/source/caricaturist/keras-facenet/model/keras/model/facenet_keras.h5')
+
+    perceptual_model = PerceptualModel(args, perc_model=perc_model, facenet_model=facenet_model, batch_size=args.batch_size)
     perceptual_model.build_perceptual_model(generator)
+
 
     ff_model = None
 

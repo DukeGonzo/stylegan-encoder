@@ -7,6 +7,8 @@ from keras.models import Model
 from keras.utils import get_file
 from keras.applications.vgg16 import VGG16, preprocess_input
 import keras.backend as K
+import keras.layers as layers
+
 import traceback
 
 def load_images(images_list, image_size=256):
@@ -22,6 +24,9 @@ def load_images(images_list, image_size=256):
 def tf_custom_l1_loss(img1,img2):
   return tf.math.reduce_mean(tf.math.abs(img2-img1), axis=None)
 
+def tf_custom_l2_loss(img1,img2):
+  return tf.sqrt(tf.math.reduce_mean(tf.math.square(img2-img1), axis=None))
+
 def tf_custom_logcosh_loss(img1,img2):
   return tf.math.reduce_mean(tf.keras.losses.logcosh(img1,img2))
 
@@ -33,7 +38,7 @@ def unpack_bz2(src_path):
     return dst_path
 
 class PerceptualModel:
-    def __init__(self, args, batch_size=1, perc_model=None, sess=None):
+    def __init__(self, args, batch_size=1, perc_model=None, facenet_model=None, sess=None):
         self.sess = tf.get_default_session() if sess is None else sess
         K.set_session(self.sess)
         self.epsilon = 0.00000001
@@ -46,7 +51,9 @@ class PerceptualModel:
         self.face_mask = args.face_mask
         self.use_grabcut = args.use_grabcut
         self.scale_mask = args.scale_mask
+        self.facenet_loss = args.use_facenet_loss
         self.mask_dir = args.mask_dir
+        self.facenet_model = None
         if (self.layer <= 0 or self.vgg_loss <= self.epsilon):
             self.vgg_loss = None
         self.pixel_loss = args.use_pixel_loss
@@ -66,6 +73,13 @@ class PerceptualModel:
             self.perc_model = perc_model
         else:
             self.perc_model = None
+
+        if self.facenet_loss <= self.epsilon:
+            self.facenet_loss = None
+        if facenet_model is not None:
+            self.facenet_model = facenet_model
+
+
         self.ref_img = None
         self.ref_weight = None
         self.perceptual_model = None
@@ -116,7 +130,17 @@ class PerceptualModel:
 
         if (self.vgg_loss is not None):
             vgg16 = VGG16(include_top=False, input_shape=(self.img_size, self.img_size, 3))
-            self.perceptual_model = Model(vgg16.input, vgg16.layers[self.layer].output)
+            # vgg16.summary()
+
+            for i, l in enumerate(vgg16.layers):
+                print(f'{i}, {l.output}')
+
+            print(f'======================{self.layer}===========================')
+
+            out = vgg16.layers[self.layer].output
+            out = layers.Lambda(lambda x: (x - K.mean(x, axis=(1,2, 3), keepdims=True)) / K.std(x, axis=(1,2, 3), keepdims=True))(out)
+            # out = [la.output, (-1,) for la in vgg16.layers[self.layer - 2 : self.layer+2]]
+            self.perceptual_model = Model(vgg16.input, out)
             generated_img_features = self.perceptual_model(preprocess_input(self.ref_weight * generated_image))
             self.ref_img_features = tf.get_variable('ref_img_features', shape=generated_img_features.shape,
                                                 dtype='float32', initializer=tf.initializers.zeros())
@@ -131,17 +155,69 @@ class PerceptualModel:
         if (self.vgg_loss is not None):
             self.loss += self.vgg_loss * tf_custom_l1_loss(self.features_weight * self.ref_img_features, self.features_weight * generated_img_features)
         # + logcosh loss on image pixels
+        # if (self.pixel_loss is not None):
+        #     self.loss += self.pixel_loss * tf_custom_logcosh_loss(self.ref_weight * self.ref_img, self.ref_weight * generated_image)
+        # + sobelloss
         if (self.pixel_loss is not None):
-            self.loss += self.pixel_loss * tf_custom_logcosh_loss(self.ref_weight * self.ref_img, self.ref_weight * generated_image)
+            # generated_image_gray =  tf.image.rgb_to_grayscale(generated_image)
+            generated_image_gray =  generated_image
+            gen_sob =  tf.image.sobel_edges(generated_image_gray)
+            # ref_img =  tf.image.rgb_to_grayscale(self.ref_img)
+            ref_img =  self.ref_img
+            ref_sob =  tf.image.sobel_edges(ref_img)
+
+            self.loss += self.pixel_loss * tf_custom_l1_loss(ref_sob, gen_sob)
+            # self.loss += self.pixel_loss * tf_custom_logcosh_loss(ref_sob, gen_sob)
         # + MS-SIM loss on image pixels
         if (self.mssim_loss is not None):
             self.loss += self.mssim_loss * tf.math.reduce_mean(1-tf.image.ssim_multiscale(self.ref_weight * self.ref_img, self.ref_weight * generated_image, 1))
         # + extra perceptual loss on image pixels
         if self.perc_model is not None and self.lpips_loss is not None:
             self.loss += self.lpips_loss * tf.math.reduce_mean(self.compare_images(self.ref_weight * self.ref_img, self.ref_weight * generated_image))
+
+        if self.facenet_model is not None and self.facenet_loss is not None:
+            #crop 160:
+            # [82: 192, 72: 182]
+            croped_ref = tf.image.crop_to_bounding_box(self.ref_img, 82, 72, 110, 110)
+            res_ref = tf.image.resize_images(croped_ref, (160,160))
+
+            croped_generated_image = tf.image.crop_to_bounding_box(generated_image, 82, 72, 110, 110)
+
+            res_generated_image= tf.image.resize_images(croped_generated_image, (160,160))
+
+            # self.facenet_model.summary()
+            #loss
+            facenet_ref = self.facenet_model(self.prewhiten(res_ref))
+            facenet_ref_flip = self.facenet_model(self.flip(self.prewhiten(res_ref)))
+            # facenet_ref += facenet_ref_flip
+            # facenet_ref /= 2.0
+
+            facenet_gen = self.facenet_model(self.prewhiten(res_generated_image))
+            facenet_gen_flip = self.facenet_model(self.flip(self.prewhiten(res_generated_image)))
+            # facenet_gen += facenet_gen_flip
+            # facenet_gen /= 2.0
+
+            # facenet_ref=tf.math.l2_normalize(facenet_ref, axis=-1)
+            # facenet_gen=tf.math.l2_normalize(facenet_gen, axis=-1)
+
+            self.loss += self.facenet_loss * (tf_custom_l1_loss(facenet_ref, facenet_gen) + tf_custom_l1_loss(facenet_ref_flip, facenet_gen_flip)) / 2.0
+
         # + L1 penalty on dlatent weights
+
         if self.l1_penalty is not None:
-            self.loss += self.l1_penalty * 512 * tf.math.reduce_mean(tf.math.abs(generator.dlatent_variable-generator.get_dlatent_avg()))
+            dlatent_avg = generator.dlatent_variable-generator.get_dlatent_avg()
+            print(dlatent_avg)
+            self.loss += self.l1_penalty * 512 * tf.sqrt(tf.math.reduce_mean(tf.math.square(dlatent_avg)))
+
+    def prewhiten(self, x):
+        mean = tf.reduce_mean(x, axis=(1, 2, 3), keepdims=True)
+        std = K.std(x, axis=(1, 2, 3), keepdims=True)
+        std_adj = tf.maximum(std, 1.0 / np.sqrt(512))
+        return (x - mean) / std_adj
+
+    def flip(self, x):
+        return tf.image.flip_left_right(x)
+
 
     def generate_face_mask(self, im):
         from imutils import face_utils
@@ -235,7 +311,9 @@ class PerceptualModel:
 
     def optimize(self, vars_to_optimize, iterations=200):
         vars_to_optimize = vars_to_optimize if isinstance(vars_to_optimize, list) else [vars_to_optimize]
+        # optimizer = tf.contrib.opt.NadamOptimizer(learning_rate=self.learning_rate)
         optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+
         min_op = optimizer.minimize(self.loss, var_list=[vars_to_optimize])
         self.sess.run(tf.variables_initializer(optimizer.variables()))
         self.sess.run(self._reset_global_step)
