@@ -38,6 +38,8 @@ def main():
     parser.add_argument('--load_effnet', default='data/finetuned_effnet.h5', help='Model to load for EfficientNet approximation of dlatents')
     parser.add_argument('--load_resnet', default='data/finetuned_resnet.h5', help='Model to load for ResNet approximation of dlatents')
 
+    parser.add_argument('--fastai', action='store_true', help='Use fast.ai single ramp-and-decay schedule, --lr==max LR')
+
     # Loss function options
     parser.add_argument('--use_vgg_loss', default=100, help='Use VGG perceptual loss; 0 to disable, > 0 to scale.', type=float)
     parser.add_argument('--use_vgg_layer', default=9, help='Pick which VGG layer to use.', type=int)

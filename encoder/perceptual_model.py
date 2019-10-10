@@ -45,6 +45,8 @@ class PerceptualModel:
         self.lr = args.lr
         self.decay_rate = args.decay_rate
         self.decay_steps = args.decay_steps
+        self.fastai_schedule = args.fastai
+        self.iterations = args.iterations
         self.img_size = args.image_size
         self.layer = args.use_vgg_layer
         self.vgg_loss = args.use_vgg_loss
@@ -113,8 +115,12 @@ class PerceptualModel:
         global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="global_step")
         incremented_global_step = tf.assign_add(global_step, 1)
         self._reset_global_step = tf.assign(global_step, 0)
-        self.learning_rate = tf.train.exponential_decay(self.lr, incremented_global_step,
-                self.decay_steps, self.decay_rate, staircase=True)
+        if self.fastai_schedule:
+            self.learning_rate = tf.minimum(self.lr * 2 * tf.cast(incremented_global_step, tf.float32) / self.iterations, 
+                                            self.lr * 2 * (1 - tf.cast(incremented_global_step, tf.float32) / self.iterations))
+        else:
+            self.learning_rate = tf.train.exponential_decay(self.lr, incremented_global_step,
+                    self.decay_steps, self.decay_rate, staircase=True)
         self.sess.run([self._reset_global_step])
 
         generated_image_tensor = generator.generated_image
