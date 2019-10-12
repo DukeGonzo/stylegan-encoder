@@ -89,9 +89,11 @@ class PerceptualModel:
         self.features_weight = None
         self.loss = None
 
-        if self.face_mask:
+        if self.facenet_model is not None or self.face_mask:
             import dlib
             self.detector = dlib.get_frontal_face_detector()
+
+        if self.face_mask:
             LANDMARKS_MODEL_URL = 'http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2'
             landmarks_model_path = unpack_bz2(get_file('shape_predictor_68_face_landmarks.dat.bz2',
                                                     LANDMARKS_MODEL_URL, cache_subdir='temp'))
@@ -182,31 +184,39 @@ class PerceptualModel:
             self.loss += self.lpips_loss * tf.math.reduce_mean(self.compare_images(self.ref_weight * self.ref_img, self.ref_weight * generated_image))
 
         if self.facenet_model is not None and self.facenet_loss is not None:
+            self.ref_boxes = tf.get_variable('ref_boxes', (self.batch_size, 4), dtype='float32')
+            self.add_placeholder("ref_boxes")
+
             #crop 160:
             # [82: 192, 72: 182]
-            croped_ref = tf.image.crop_to_bounding_box(self.ref_img, 82, 72, 110, 110)
-            res_ref = tf.image.resize_images(croped_ref, (160,160))
+            # croped_ref = tf.image.crop_to_bounding_box(self.ref_img, 82, 72, 110, 110)
+            # res_ref = tf.image.resize_images(croped_ref, (160,160))
+            batch_size = tf.shape(self.ref_img)[0]
+            res_ref = tf.image.crop_and_resize(self.ref_img, self.ref_boxes, tf.range(0, batch_size, dtype='int32'), (160,160))
 
-            croped_generated_image = tf.image.crop_to_bounding_box(generated_image, 82, 72, 110, 110)
-
-            res_generated_image= tf.image.resize_images(croped_generated_image, (160,160))
+            # croped_generated_image = tf.image.crop_to_bounding_box(generated_image, 82, 72, 110, 110)
+            # res_generated_image= tf.image.resize_images(croped_generated_image, (160,160))
+            res_generated_image = tf.image.crop_and_resize(generated_image, self.ref_boxes, tf.range(0, batch_size, dtype='int32'), (160,160))
 
             # self.facenet_model.summary()
             #loss
             facenet_ref = self.facenet_model(self.prewhiten(res_ref))
-            facenet_ref_flip = self.facenet_model(self.flip(self.prewhiten(res_ref)))
+            # facenet_ref_flip = self.facenet_model(self.flip(self.prewhiten(res_ref)))
+
             # facenet_ref += facenet_ref_flip
             # facenet_ref /= 2.0
 
             facenet_gen = self.facenet_model(self.prewhiten(res_generated_image))
-            facenet_gen_flip = self.facenet_model(self.flip(self.prewhiten(res_generated_image)))
+            # facenet_gen_flip = self.facenet_model(self.flip(self.prewhiten(res_generated_image)))
+
             # facenet_gen += facenet_gen_flip
             # facenet_gen /= 2.0
 
             # facenet_ref=tf.math.l2_normalize(facenet_ref, axis=-1)
             # facenet_gen=tf.math.l2_normalize(facenet_gen, axis=-1)
 
-            self.loss += self.facenet_loss * (tf_custom_l1_loss(facenet_ref, facenet_gen) + tf_custom_l1_loss(facenet_ref_flip, facenet_gen_flip)) / 2.0
+            # self.loss += self.facenet_loss * (tf_custom_l1_loss(facenet_ref, facenet_gen) + tf_custom_l1_loss(facenet_ref_flip, facenet_gen_flip)) / 2.0
+            self.loss += self.facenet_loss * tf_custom_l1_loss(facenet_ref, facenet_gen)
 
         # + L1 penalty on dlatent weights
 
@@ -291,6 +301,22 @@ class PerceptualModel:
         else:
             image_mask = np.ones(self.ref_weight.shape)
 
+        boxes = None
+        if self.facenet_model:
+            boxes = np.zeros((len(images_list), 4))
+            w = loaded_image.shape[1]
+            h = loaded_image.shape[2]
+            for i, img in enumerate(loaded_image):
+                faces = self.detector(img)
+                if len(faces) == 0:
+                    continue
+                x1 = faces[0].tl_corner().x
+                y1 = faces[0].tl_corner().y
+                x2 = faces[0].br_corner().x
+                y2 = faces[0].br_corner().y
+
+                boxes[i] = [y1/h, x1/w, y2/h, x2/w]
+
         if len(images_list) != self.batch_size:
             if image_features is not None:
                 features_space = list(self.features_weight.shape[1:])
@@ -308,12 +334,16 @@ class PerceptualModel:
             empty_images = np.zeros(shape=empty_images_space)
             image_mask = image_mask * np.vstack([existing_images, empty_images])
             loaded_image = np.vstack([loaded_image, np.zeros(empty_images_space)])
+            if boxes is not None:
+                boxes = np.vstack([boxes, np.zeros([self.batch_size - len(images_list)])])                
 
         if image_features is not None:
             self.assign_placeholder("features_weight", weight_mask)
             self.assign_placeholder("ref_img_features", image_features)
         self.assign_placeholder("ref_weight", image_mask)
         self.assign_placeholder("ref_img", loaded_image)
+        if boxes is not None:
+            self.assign_placeholder("ref_boxes", boxes)
 
     def optimize(self, vars_to_optimize, iterations=200):
         vars_to_optimize = vars_to_optimize if isinstance(vars_to_optimize, list) else [vars_to_optimize]
